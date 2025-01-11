@@ -8,6 +8,7 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 
 typedef char *histdata_t;
@@ -52,6 +53,80 @@ unsigned long get_base_address(pid_t pid) {
     
     fclose(fp);
     return base_addr;
+}
+int count_lines_in_file(const char *filename) {
+    FILE *file = fopen(filename, "r");
+    if (!file) return -1;
+
+    int lines = 0;
+    char ch;
+    while ((ch = fgetc(file)) != EOF)
+        if (ch == '\n') lines++;
+
+    fclose(file);
+    return lines;
+}
+
+
+size_t get_history_diff(pid_t pid, unsigned long address, int history_file_rows) {
+    char mem_path[64];
+    snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
+
+    int mem_fd = open(mem_path, O_RDONLY);
+    if (mem_fd == -1) {
+        perror("Error opening /proc/<pid>/mem");
+        return 0;
+    }
+
+    HIST_ENTRY *entry_ptr = NULL;
+    size_t size = 0;
+    unsigned long *ptr_2_ptr = NULL, *ptr_line = NULL;
+    char line[256];
+
+    // Loop to read history entries from the remote process memory
+    while (1) {
+        // Read the pointer to the next HIST_ENTRY
+        if (pread(mem_fd, &entry_ptr, sizeof(entry_ptr), address + size * sizeof(entry_ptr)) != sizeof(entry_ptr)) {
+            perror("Error reading HIST_ENTRY pointer");
+            close(mem_fd);
+            return 0; // Return 0 if reading fails
+        }
+
+        // If we have passed the history file rows, start processing entries
+        if (size > history_file_rows) {
+            // Read the pointer to the 'line' string
+            if (pread(mem_fd, &ptr_2_ptr, sizeof(unsigned long), address + (size - 1) * sizeof(entry_ptr)) != sizeof(unsigned long)) {
+                perror("Error reading pointer to 'line'");
+                close(mem_fd);
+                return 0;
+            }
+
+            // Read the actual 'line' pointer
+            if (pread(mem_fd, &ptr_line, sizeof(unsigned long), ptr_2_ptr) != sizeof(unsigned long)) {
+                perror("Error reading 'line' pointer");
+                close(mem_fd);
+                return 0;
+            }
+
+            // Read the 'line' string from memory
+            if (pread(mem_fd, line, sizeof(line), ptr_line) < 0) {
+                perror("Error reading 'line' string");
+                close(mem_fd);
+                return 0;
+            }
+
+            // Print the retrieved 'line'
+            printf("line: %s\n", line);
+
+            // If NULL entry is found, stop processing
+            if (entry_ptr == NULL) break;
+        }
+
+        size++;
+    }
+
+    close(mem_fd); 
+    return size;   
 }
 
 int main(int argc, char *argv[]) {
@@ -137,9 +212,15 @@ int main(int argc, char *argv[]) {
     }
     
     
-    
+    HIST_ENTRY *the_history ;
     if (regs.rax != 0) {
-    printf("Return value (HIST_ENTRY**): %p\n", regs.rax);
+    the_history = (HIST_ENTRY**)regs.rax;
+    printf("Return value (HIST_ENTRY**): %p\n", the_history);
+    int history_file_rows = count_lines_in_file("/home/user/.bash_history");
+    printf("Printing commands from history:\n");
+    get_history_diff(target_pid,the_history,history_file_rows);    
+
+    
     }
 
 
